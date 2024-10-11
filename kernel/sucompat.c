@@ -279,7 +279,6 @@ void ksu_sucompat_exit()
 #endif
 }
 
-
 #ifdef CONFIG_KSU_SUSFS_SUS_SU
 extern bool ksu_devpts_hook;
 
@@ -299,4 +298,3 @@ void ksu_susfs_enable_sus_su(void) {
 	ksu_devpts_hook = true;
 }
 #endif
-

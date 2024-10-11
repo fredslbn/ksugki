@@ -33,6 +33,13 @@
 #include <linux/vmalloc.h>
 #endif
 
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs.h>
+#ifdef CONFIG_KSU_SUSFS_SUS_SU
+#include "sucompat.h"
+#endif // #ifdef CONFIG_KSU_SUSFS_SUS_SU
+#endif // #ifdef CONFIG_KSU_SUSFS
+
 #include "allowlist.h"
 #include "arch.h"
 #include "core_hook.h"
@@ -46,10 +53,6 @@
 #include "kernel_compat.h"
 
 #ifdef CONFIG_KSU_SUSFS
-#include <linux/susfs.h>
-#ifdef CONFIG_KSU_SUSFS_SUS_SU
-#include "sucompat.h"
-#endif
 bool susfs_is_allow_su(void)
 {
 	if (is_manager()) {
@@ -58,7 +61,9 @@ bool susfs_is_allow_su(void)
 	}
 	return ksu_is_allow_uid(current_uid().val);
 }
-#endif
+
+static u32 zygote_sid = 0;
+#endif // #ifdef CONFIG_KSU_SUSFS
 
 static bool ksu_module_mounted = false;
 
@@ -630,8 +635,9 @@ static void ksu_umount_mnt(struct path *path, int flags)
 #ifdef CONFIG_KSU_SUSFS
 void try_umount(const char *mnt, bool check_mnt, int flags)
 #else
-static void try_umount(const char *mnt, bool check_mnt, int flags)
+ static void try_umount(const char *mnt, bool check_mnt, int flags)
 #endif
+
 {
 	struct path path;
 	int err = kern_path(mnt, 0, &path);
@@ -672,22 +678,23 @@ int ksu_handle_setuid(struct cred *new, const struct cred *old)
 	}
 
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
-	// check for newly created zygote process
-	if (unlikely(new_uid.val == 0) && is_zygote(new->security)) {
-		// set the NS_IS_ZYGOTGE flag on zygote process for later use
-		// This is for sus mount code to identify if the user mnt namespace is zygote
-		if (!(new->user_ns->android_kabi_reserved1 & NS_KABI1_IS_ZYGOTE)) {
-			new->user_ns->android_kabi_reserved1 |= NS_KABI1_IS_ZYGOTE;
-			pr_info("susfs: Found new zygote process, writing flag NS_IS_ZYGOTGE to its namespace\n");
-			return 0;
-		}
+	// check if spawned process is zygote
+	if (unlikely(new_uid.val == 0 && is_zygote(new->security))) {
+		zygote_sid = ksu_get_zygote_sid();
 	}
-#endif
 
-#ifdef CONFIG_KSU_SUSFS_SUS_SU
-	// Don't umount for mananger app
-	if (unlikely(ksu_get_manager_uid() == new_uid.val)) {
-		return 0;
+	// check if current process is zygote
+	bool is_zygote_child = zygote_sid == ksu_get_current_sid();
+	if (likely(is_zygote_child)) {
+		// set flag TASK_STRUCT_KABI1_IS_ZYGOTE to current->android_kabi_reserved1
+		if (unlikely(!(current->android_kabi_reserved1 & TASK_STRUCT_KABI1_IS_ZYGOTE))) {
+			current->android_kabi_reserved1 |= TASK_STRUCT_KABI1_IS_ZYGOTE;
+			pr_info("susfs: Found newly created zygote process\n");
+		}
+		// if spawned process is non user app process, run try_umount()
+		if (unlikely(new_uid.val < 10000 && new_uid.val >= 1000)) {
+			goto out_try_umount;
+		}
 	}
 #endif
 
@@ -700,10 +707,11 @@ int ksu_handle_setuid(struct cred *new, const struct cred *old)
 		// pr_info("handle setuid ignore allowed application: %d\n", new_uid.val);
 		return 0;
 	}
+	
 #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 	else {
 		// if new uid is not root granted, then drop a payload to inidicate that sus_path will be effective on this uid
-		new->user->android_kabi_reserved1 |= USER_STRUCT_NON_ROOT_USER_APP_PROFILE;
+		new->user->android_kabi_reserved1 |= USER_STRUCT_KABI1_NON_ROOT_USER_APP_PROFILE;
 	}
 #endif
 
@@ -715,21 +723,33 @@ int ksu_handle_setuid(struct cred *new, const struct cred *old)
 #endif
 	}
 
-	// check old process's selinux context, if it is not zygote, ignore it!
-	// because some su apps may setuid to untrusted_app but they are in global mount namespace
-	// when we umount for such process, that is a disaster!
-	bool is_zygote_child = is_zygote(old->security);
+#ifndef CONFIG_KSU_SUSFS_SUS_MOUNT
+ 	// check old process's selinux context, if it is not zygote, ignore it!
+ 	// because some su apps may setuid to untrusted_app but they are in global mount namespace
+ 	// when we umount for such process, that is a disaster!
+ 	bool is_zygote_child = is_zygote(old->security);
+#endif
+
 	if (!is_zygote_child) {
 		pr_info("handle umount ignore non zygote child: %d\n",
 			current->pid);
 		return 0;
 	}
+	
 #ifdef CONFIG_KSU_DEBUG
 	// umount the target mnt
 	pr_info("handle umount for uid: %d, pid: %d\n", new_uid.val,
 		current->pid);
 #endif
 
+#ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
+	// susfs come first, and lastly umount by ksu, make sure umount in reversed order
+	susfs_try_umount(new_uid.val);
+#endif
+
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+out_try_umount:
+#endif
 #ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
 	// susfs come first, and lastly umount by ksu, make sure umount in reversed order
 	susfs_try_umount(new_uid.val);
