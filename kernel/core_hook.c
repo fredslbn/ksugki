@@ -742,11 +742,6 @@ int ksu_handle_setuid(struct cred *new, const struct cred *old)
 		current->pid);
 #endif
 
-#ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
-	// susfs come first, and lastly umount by ksu, make sure umount in reversed order
-	susfs_try_umount(new_uid.val);
-#endif
-
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 out_try_umount:
 #endif
